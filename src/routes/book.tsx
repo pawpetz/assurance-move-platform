@@ -23,6 +23,7 @@ import {
   usStates,
 } from "@/lib/booking-constants";
 import { createBooking, type BookingItemEntry, type LocationDetails } from "@/lib/bookings-store";
+import { toast } from "sonner";
 import { serviceBySlug } from "@/lib/site-content";
 import { cn } from "@/lib/utils";
 
@@ -181,32 +182,36 @@ function BookPage() {
       return;
     }
     setSubmitting(true);
-    // Simulate a brief submit delay. Once Supabase is connected, this becomes
-    // a real insert (booking row + booking_items + uploaded photos to storage).
-    await new Promise((r) => setTimeout(r, 500));
-    const booking = createBooking({
-      service: form.service,
-      serviceOther: form.serviceOther,
-      pickup: form.pickup,
-      dropoff: form.dropoff,
-      items: form.items,
-      rooms: form.rooms,
-      estimatedBoxes: form.estimatedBoxes,
-      heavyItems: form.heavyItems,
-      specialHandling: form.specialHandling,
-      largeItemDescription: form.largeItemDescription,
-      photoNames: form.photos.map((p) => p.name),
-      customer: {
-        firstName: form.customer.firstName,
-        lastName: form.customer.lastName,
-        email: form.customer.email,
-        phone: form.customer.phone,
-        preferredContact: form.customer.preferredContact,
-        notes: form.customer.notes,
-      },
-    });
-    setSubmitting(false);
-    navigate({ to: "/book/confirmation", search: { booking: booking.bookingNumber } });
+    try {
+      const booking = await createBooking({
+        service: form.service,
+        serviceOther: form.serviceOther,
+        pickup: form.pickup,
+        dropoff: form.dropoff,
+        items: form.items,
+        rooms: form.rooms,
+        estimatedBoxes: form.estimatedBoxes,
+        heavyItems: form.heavyItems,
+        specialHandling: form.specialHandling,
+        largeItemDescription: form.largeItemDescription,
+        photos: form.photos,
+        customer: {
+          firstName: form.customer.firstName,
+          lastName: form.customer.lastName,
+          email: form.customer.email,
+          phone: form.customer.phone,
+          preferredContact: form.customer.preferredContact,
+          notes: form.customer.notes,
+        },
+      });
+      navigate({ to: "/book/confirmation", search: { booking: booking.bookingNumber } });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Something went wrong submitting your request.",
+      );
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   const serviceName =

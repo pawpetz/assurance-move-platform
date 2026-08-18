@@ -5,7 +5,11 @@ import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHero } from "@/components/site/PageHero";
-import { bookingStatusOrder, getBookingByNumber, type StoredBooking } from "@/lib/bookings-store";
+import {
+  bookingStatusOrder,
+  getBookingStatus,
+  type BookingStatusRecord,
+} from "@/lib/bookings-store";
 import { cn } from "@/lib/utils";
 
 const searchSchema = z.object({
@@ -30,18 +34,22 @@ export const Route = createFileRoute("/track")({
 function TrackPage() {
   const { booking: bookingFromUrl } = Route.useSearch();
   const [value, setValue] = useState(bookingFromUrl ?? "");
-  const [result, setResult] = useState<StoredBooking | null | undefined>(undefined);
+  const [result, setResult] = useState<BookingStatusRecord | null | undefined>(undefined);
+  const [loading, setLoading] = useState(false);
 
-  function runLookup(number: string) {
+  async function runLookup(number: string) {
     if (!number.trim()) {
       setResult(undefined);
       return;
     }
-    setResult(getBookingByNumber(number) ?? null);
+    setLoading(true);
+    const record = await getBookingStatus(number);
+    setResult(record);
+    setLoading(false);
   }
 
   useEffect(() => {
-    if (bookingFromUrl) runLookup(bookingFromUrl);
+    if (bookingFromUrl) void runLookup(bookingFromUrl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -58,7 +66,7 @@ function TrackPage() {
             className="flex gap-2"
             onSubmit={(e) => {
               e.preventDefault();
-              runLookup(value);
+              void runLookup(value);
             }}
           >
             <Input
@@ -67,8 +75,8 @@ function TrackPage() {
               onChange={(e) => setValue(e.target.value)}
               aria-label="Booking number"
             />
-            <Button type="submit" variant="hero">
-              Track
+            <Button type="submit" variant="hero" disabled={loading}>
+              {loading ? "Searching…" : "Track"}
             </Button>
           </form>
 
@@ -99,7 +107,7 @@ function TrackPage() {
   );
 }
 
-function StatusTimeline({ booking }: { booking: StoredBooking }) {
+function StatusTimeline({ booking }: { booking: BookingStatusRecord }) {
   const currentIndex = bookingStatusOrder.indexOf(booking.status);
   const isCancelled = booking.status === "Cancelled";
 

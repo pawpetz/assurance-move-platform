@@ -1,17 +1,17 @@
 /**
- * TEMPORARY data layer for booking requests.
+ * Booking data layer — backed by Supabase.
  *
- * There is no database connected yet. This module persists bookings to the
- * browser's localStorage so the booking flow and Track My Move page are
- * fully functional end-to-end during development.
+ * Public/anonymous visitors can INSERT bookings (see the RLS policies in
+ * supabase/migrations/0001_init.sql) but cannot read them back directly.
+ * Status lookups for Track My Move go through the `get_booking_status`
+ * RPC, which only ever exposes a few non-sensitive fields for a single
+ * booking number.
  *
- * IMPORTANT: this only works on the device/browser that submitted the
- * booking. It is NOT shared across devices and is NOT what real customers
- * should rely on. Once Supabase is connected, replace the implementation of
- * these functions with real database calls — the function signatures are
- * written to match what the Supabase-backed version will look like, so
- * nothing else in the app should need to change.
+ * Reading full booking data (for the owner's admin dashboard) requires an
+ * authenticated admin session and is not implemented yet — that lands with
+ * the admin dashboard build.
  */
+import { supabase } from "@/lib/supabase";
 
 export type BookingStatus =
   | "New Request"
@@ -61,10 +61,7 @@ export interface BookingCustomer {
   notes: string;
 }
 
-export interface StoredBooking {
-  bookingNumber: string;
-  createdAt: string;
-  status: BookingStatus;
+export interface NewBookingInput {
   service: string;
   serviceOther: string;
   pickup: LocationDetails;
@@ -75,66 +72,171 @@ export interface StoredBooking {
   heavyItems: string;
   specialHandling: string;
   largeItemDescription: string;
-  photoNames: string[];
+  photos: File[];
   customer: BookingCustomer;
-  quoteAmount: number | null;
-  paymentStatus: "Unpaid" | "Deposit Paid" | "Partially Paid" | "Paid" | "Refunded";
 }
 
-const STORAGE_KEY = "at_bookings_v1";
+export interface CreatedBooking {
+  bookingNumber: string;
+}
 
-function readAll(): StoredBooking[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    return JSON.parse(raw) as StoredBooking[];
-  } catch {
-    return [];
+export interface BookingStatusRecord {
+  bookingNumber: string;
+  status: BookingStatus;
+  serviceSlug: string | null;
+  serviceOther: string | null;
+  pickupDate: string | null;
+  dropoffDate: string | null;
+  createdAt: string;
+}
+
+function yesNoToBool(v: YesNo): boolean | null {
+  if (v === "yes") return true;
+  if (v === "no") return false;
+  return null;
+}
+
+const PHOTO_BUCKET = "booking-photos";
+
+export async function createBooking(input: NewBookingInput): Promise<CreatedBooking> {
+  // 1. Create (or just record) the customer.
+  const { data: customer, error: customerError } = await supabase
+    .from("customers")
+    .insert({
+      first_name: input.customer.firstName,
+      last_name: input.customer.lastName,
+      email: input.customer.email,
+      phone: input.customer.phone,
+    })
+    .select("id")
+    .single();
+
+  if (customerError) {
+    throw new Error(`Could not save customer information: ${customerError.message}`);
   }
+
+  // 2. Create the booking itself.
+  const knownServiceSlugs = new Set([
+    "residential-moving",
+    "commercial-office-moving",
+    "local-moving",
+    "long-distance-moving",
+    "interstate-moving",
+    "trucking-freight",
+    "furniture-delivery",
+    "junk-removal",
+    "storage",
+  ]);
+  const serviceSlug = knownServiceSlugs.has(input.service) ? input.service : null;
+
+  const { data: booking, error: bookingError } = await supabase
+    .from("bookings")
+    .insert({
+      customer_id: customer.id,
+      service_slug: serviceSlug,
+      service_other: serviceSlug ? null : input.serviceOther || input.service,
+
+      pickup_address: input.pickup.address,
+      pickup_unit: input.pickup.unit || null,
+      pickup_city: input.pickup.city,
+      pickup_state: input.pickup.state,
+      pickup_zip: input.pickup.zip,
+      pickup_contact_name: input.pickup.contactName || null,
+      pickup_contact_phone: input.pickup.contactPhone || null,
+      pickup_date: input.pickup.date || null,
+      pickup_time_window: input.pickup.timeWindow || null,
+      pickup_elevator: yesNoToBool(input.pickup.elevator),
+      pickup_stairs: yesNoToBool(input.pickup.stairs),
+      pickup_parking_difficult: yesNoToBool(input.pickup.parkingDifficult),
+      pickup_access_notes: input.pickup.accessNotes || null,
+
+      dropoff_address: input.dropoff.address,
+      dropoff_unit: input.dropoff.unit || null,
+      dropoff_city: input.dropoff.city,
+      dropoff_state: input.dropoff.state,
+      dropoff_zip: input.dropoff.zip,
+      dropoff_contact_name: input.dropoff.contactName || null,
+      dropoff_contact_phone: input.dropoff.contactPhone || null,
+      dropoff_date: input.dropoff.date || null,
+      dropoff_time_window: input.dropoff.timeWindow || null,
+      dropoff_elevator: yesNoToBool(input.dropoff.elevator),
+      dropoff_stairs: yesNoToBool(input.dropoff.stairs),
+      dropoff_parking_difficult: yesNoToBool(input.dropoff.parkingDifficult),
+      dropoff_access_notes: input.dropoff.accessNotes || null,
+
+      rooms: input.rooms || null,
+      estimated_boxes: input.estimatedBoxes || null,
+      heavy_items: input.heavyItems || null,
+      special_handling: input.specialHandling || null,
+      large_item_description: input.largeItemDescription || null,
+
+      preferred_contact_method: input.customer.preferredContact || null,
+      customer_notes: input.customer.notes || null,
+    })
+    .select("id, booking_number")
+    .single();
+
+  if (bookingError) {
+    throw new Error(`Could not create booking: ${bookingError.message}`);
+  }
+
+  // 3. Insert items.
+  if (input.items.length > 0) {
+    const { error: itemsError } = await supabase.from("booking_items").insert(
+      input.items.map((item) => ({
+        booking_id: booking.id,
+        name: item.name,
+        quantity: item.quantity,
+      })),
+    );
+    if (itemsError) {
+      console.error("Failed to save booking items:", itemsError.message);
+    }
+  }
+
+  // 4. Upload photos to storage and record their paths.
+  if (input.photos.length > 0) {
+    for (const file of input.photos) {
+      const path = `${booking.id}/${crypto.randomUUID()}-${file.name}`;
+      const { error: uploadError } = await supabase.storage.from(PHOTO_BUCKET).upload(path, file);
+      if (uploadError) {
+        console.error(`Failed to upload photo "${file.name}":`, uploadError.message);
+        continue;
+      }
+      const { error: photoRowError } = await supabase
+        .from("booking_photos")
+        .insert({ booking_id: booking.id, storage_path: path });
+      if (photoRowError) {
+        console.error("Failed to record uploaded photo:", photoRowError.message);
+      }
+    }
+  }
+
+  return { bookingNumber: booking.booking_number as string };
 }
 
-function writeAll(bookings: StoredBooking[]) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(bookings));
-}
+export async function getBookingStatus(bookingNumber: string): Promise<BookingStatusRecord | null> {
+  const { data, error } = await supabase.rpc("get_booking_status", {
+    p_booking_number: bookingNumber.trim(),
+  });
 
-function generateBookingNumber(existing: StoredBooking[]): string {
-  const existingNumbers = new Set(existing.map((b) => b.bookingNumber));
-  let candidate: string;
-  do {
-    const n = 10000 + Math.floor(Math.random() * 89999);
-    candidate = `AT-${n}`;
-  } while (existingNumbers.has(candidate));
-  return candidate;
-}
+  if (error) {
+    console.error("Failed to look up booking status:", error.message);
+    return null;
+  }
 
-export type NewBookingInput = Omit<
-  StoredBooking,
-  "bookingNumber" | "createdAt" | "status" | "quoteAmount" | "paymentStatus"
->;
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) return null;
 
-export function createBooking(input: NewBookingInput): StoredBooking {
-  const all = readAll();
-  const booking: StoredBooking = {
-    ...input,
-    bookingNumber: generateBookingNumber(all),
-    createdAt: new Date().toISOString(),
-    status: "New Request",
-    quoteAmount: null,
-    paymentStatus: "Unpaid",
+  return {
+    bookingNumber: row.booking_number,
+    status: row.status as BookingStatus,
+    serviceSlug: row.service_slug,
+    serviceOther: row.service_other,
+    pickupDate: row.pickup_date,
+    dropoffDate: row.dropoff_date,
+    createdAt: row.created_at,
   };
-  writeAll([booking, ...all]);
-  return booking;
-}
-
-export function listBookings(): StoredBooking[] {
-  return readAll();
-}
-
-export function getBookingByNumber(bookingNumber: string): StoredBooking | undefined {
-  const normalized = bookingNumber.trim().toUpperCase();
-  return readAll().find((b) => b.bookingNumber.toUpperCase() === normalized);
 }
 
 export const bookingStatusOrder: BookingStatus[] = [
